@@ -1,5 +1,7 @@
 # Meric's Game Tools - Map Generator
 
+![Screenshot](/assets/screenshot.png)
+
 Meric's Game Tools - Map Generator is a desktop workbench for creating Meric's Game Tools map packages. It lets you choose input GeoJSON layers, tune generation options, preview layers, generate provinces and sea regions, and export a complete package.
 
 Repository: <https://github.com/merchizm/mgt_map_generator>
