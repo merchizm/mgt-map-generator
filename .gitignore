@@ -1,0 +1,5 @@
+.venv
+build/
+__pycache__/
+mgt_map_gen_py/__pycache__/
+.idea

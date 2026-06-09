@@ -1,0 +1,22 @@
+[project]
+name = "mgt-map-gen-py"
+version = "0.1.0"
+description = " Meric's Game Tools - Geojson Map generator"
+requires-python = ">=3.10"
+dependencies = [
+  "PySide6>=6.7",
+  "shapely>=2.0",
+  "scipy>=1.11",
+  "numpy>=1.24",
+]
+
+[project.scripts]
+mgt-map-gen = "mgt_map_gen_py.ui.app:main"
+mgt-map-gen-cli = "mgt_map_gen_py.cli.main:main"
+
+[tool.setuptools.packages.find]
+include = ["mgt_map_gen_py*"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
