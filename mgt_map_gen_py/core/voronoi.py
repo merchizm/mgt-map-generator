@@ -2,7 +2,7 @@ import math
 
 import numpy as np
 from scipy.spatial import Voronoi
-from shapely.geometry import LineString, Polygon, box
+from shapely.geometry import GeometryCollection, LineString, Polygon, box
 from shapely.ops import split
 
 from .geo_utils import clean_geom
@@ -27,9 +27,60 @@ def finite_voronoi_polygons(points, bbox):
         parts = list(split(bounds_poly, divider).geoms)
         return [min(parts, key=lambda part: part.distance(point)) for point in points]
 
-    vor = Voronoi(coords)
-    regions, vertices = _finite_polygons_2d(vor)
-    return [clean_geom(Polygon(vertices[region]).intersection(bounds_poly)) for region in regions]
+    # Separate coincident seeds by a negligible, deterministic offset so qhull
+    # does not drop them (the shifted duplicate ends up with a sliver cell).
+    coords = _jitter_duplicates(coords, bbox)
+    try:
+        vor = Voronoi(coords)
+        regions, vertices = _finite_polygons_2d(vor)
+    except Exception:  # collinear seeds etc. (QhullError, missing ridges)
+        return _halfplane_cells(coords, bounds_poly)
+    cells = [
+        clean_geom(Polygon(vertices[region]).intersection(bounds_poly)) if len(region) >= 3 else GeometryCollection()
+        for region in regions
+    ]
+    # The cells of a Voronoi diagram tile the bounds exactly. Nearly-collinear seeds can make the
+    # far-point reconstruction produce garbage, so verify the tiling and fall back to the exact method.
+    if abs(sum(cell.area for cell in cells) - bounds_poly.area) > 1e-3 * bounds_poly.area:
+        return _halfplane_cells(coords, bounds_poly)
+    return cells
+
+
+def _jitter_duplicates(coords, bbox):
+    eps = max(abs(bbox[2] - bbox[0]), abs(bbox[3] - bbox[1]), 1.0) * 1e-9
+    seen = {}
+    out = coords.copy()
+    for index, (x, y) in enumerate(map(tuple, coords)):
+        count = seen.get((x, y), 0)
+        seen[(x, y)] = count + 1
+        if count:
+            out[index] = (x + eps * count, y + eps * count * 0.5)
+    return out
+
+
+def _halfplane_cells(coords, bounds_poly):
+    """O(n^2) exact Voronoi fallback for degenerate inputs: clip bounds by each bisector."""
+    far = max(bounds_poly.bounds[2] - bounds_poly.bounds[0], bounds_poly.bounds[3] - bounds_poly.bounds[1]) * 4 or 1.0
+    cells = []
+    for i, a in enumerate(coords):
+        cell = bounds_poly
+        for j, b in enumerate(coords):
+            if i == j or cell.is_empty:
+                continue
+            mid = (a + b) / 2.0
+            d = b - a
+            norm = math.hypot(*d) or 1.0
+            n = d / norm
+            t = np.array([-n[1], n[0]])
+            half = Polygon([
+                mid + t * far,
+                mid - t * far,
+                mid - t * far - n * far,
+                mid + t * far - n * far,
+            ])
+            cell = cell.intersection(half)
+        cells.append(clean_geom(cell))
+    return cells
 
 
 def _finite_polygons_2d(vor, radius=None):

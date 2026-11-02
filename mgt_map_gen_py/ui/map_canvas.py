@@ -7,20 +7,23 @@ from PySide6.QtWidgets import QGraphicsPathItem, QGraphicsScene, QGraphicsTextIt
 from ..core.geo_utils import LAYER_LABELS
 
 
+# Point layers use a constant on-screen radius (see _draw_feature); line/polygon widths are in screen pixels too.
+POINT_RADIUS = {"cities": 3.0, "generatedCities": 3.0, "movementNodes": 2.6, "railNodes": 3.6}
+
 STYLES = {
     "cities": ("#e8bf60", "#ffffff", 4.2),
     "generatedCities": ("#ff8c5c", "#ffffff", 4.2),
-    "land": ("#1fa39a40", "#dff5f1", 1.0),
+    "land": ("#1fa39a40", "#dff5f1", 0.8),
     "lakes": ("#458fff80", "#a9d2ff", 1.0),
-    "borders": ("transparent", "#e8bf60", 1.2),
+    "borders": ("transparent", "#e8bf60", 0.9),
     "oceans": ("#3f7fb650", "#91c4ff", 1.0),
     "seaRegions": ("#4a90e244", "#91c4ff", 1.0),
-    "rivers": ("transparent", "#71b1ff", 1.8),
+    "rivers": ("transparent", "#71b1ff", 1.0),
     "movementNodes": ("#ff6ec7", "#ffffff", 4.6),
-    "movementEdges": ("transparent", "#ff6ec7", 1.5),
+    "movementEdges": ("transparent", "#ff6ec7", 0.8),
     "railNodes": ("#ffcd56", "#5e4300", 5.0),
-    "railEdges": ("transparent", "#ffcd56", 1.7),
-    "output": ("#23a79555", "#e7f6f7", 0.9),
+    "railEdges": ("transparent", "#ffcd56", 1.2),
+    "output": ("#23a79555", "#e7f6f7", 1.0),
     "oceanMask": ("#1d4f7a33", "#7ab8ff", 0.8),
     "lakesMask": ("#458fff60", "#b9d9ff", 0.8),
     "syntheticLakes": ("#458fff70", "#b9d9ff", 0.8),
@@ -102,7 +105,7 @@ class MapCanvas(QGraphicsView):
     def set_layer(self, layer_key, feature_collection, overlays=None):
         self.set_layers(list(overlays or []) + [(layer_key, feature_collection)], layer_key)
 
-    def set_layers(self, layers, active_layer, bbox=None):
+    def set_layers(self, layers, active_layer, bbox=None, keep_view=False):
         self._layers = [
             (key, fc)
             for key, fc in layers
@@ -111,7 +114,7 @@ class MapCanvas(QGraphicsView):
         self._layers.sort(key=lambda item: DRAW_ORDER.get(item[0], 50))
         self._active = active_layer
         self._bbox = bbox
-        self.redraw()
+        self.redraw(keep_view)
 
     def zoom_in(self):
         self.scale(1.18, 1.18)
@@ -129,7 +132,16 @@ class MapCanvas(QGraphicsView):
         self.setDragMode(QGraphicsView.NoDrag if enabled else QGraphicsView.ScrollHandDrag)
 
     def reset_view(self):
-        self.fitInView(self._last_fit_rect.adjusted(-24, -24, 24, 24), Qt.KeepAspectRatio)
+        # Frame the generation bbox when there is one: that is where the generated provinces are,
+        # while the input layers (e.g. a world land mask) can be far larger.
+        rect = self._last_fit_rect
+        if self._bbox and self._bounds:
+            p1 = self._project(self._bbox[0], self._bbox[1])
+            p2 = self._project(self._bbox[2], self._bbox[3])
+            bbox_rect = QRectF(p1, p2).normalized()
+            if bbox_rect.width() > 4 and bbox_rect.height() > 4:
+                rect = bbox_rect
+        self.fitInView(rect.adjusted(-24, -24, 24, 24), Qt.KeepAspectRatio)
 
     def wheelEvent(self, event):
         factor = 1.18 if event.angleDelta().y() > 0 else 0.85
@@ -184,7 +196,7 @@ class MapCanvas(QGraphicsView):
             return
         super().mouseReleaseEvent(event)
 
-    def redraw(self):
+    def redraw(self, keep_view=False):
         scene = self.scene()
         scene.clear()
         bounds = self._compute_bounds()
@@ -205,7 +217,8 @@ class MapCanvas(QGraphicsView):
         self._draw_labels()
         self._draw_legend()
         self._last_fit_rect = scene.itemsBoundingRect()
-        self.reset_view()
+        if not keep_view:
+            self.reset_view()
 
     def _draw_backdrop(self):
         scene = self.scene()
@@ -271,11 +284,13 @@ class MapCanvas(QGraphicsView):
         if layer_key == self._active:
             stroke_width += 0.45
         if gtype == "Point":
-            p = self._project(coords[0], coords[1])
-            radius = stroke_width if layer_key.endswith("Nodes") else STYLES.get(layer_key, STYLES["output"])[2]
+            radius = POINT_RADIUS.get(layer_key, 3.0) + (0.6 if layer_key == self._active else 0)
             path = QPainterPath()
-            path.addEllipse(p, radius, radius)
-            item = self._add_item(path, layer_key, feat, QPen(stroke, 1.1), QColor(fill) if fill != Qt.NoBrush else stroke)
+            path.addEllipse(QPointF(0, 0), radius, radius)
+            item = self._add_item(path, layer_key, feat, QPen(stroke, 0.8), QColor(fill) if fill != Qt.NoBrush else stroke)
+            # Marker keeps its pixel size at every zoom level; only its position follows the map.
+            item.setFlag(QGraphicsPathItem.ItemIgnoresTransformations, True)
+            item.setPos(self._project(coords[0], coords[1]))
             return
         if gtype in ("LineString", "MultiLineString"):
             lines = [coords] if gtype == "LineString" else coords
@@ -299,6 +314,8 @@ class MapCanvas(QGraphicsView):
 
     def _add_item(self, path, layer_key, feat, pen, brush):
         item = FeatureItem(path, layer_key, feat, self)
+        pen = QPen(pen)
+        pen.setCosmetic(True)  # constant pixel width regardless of zoom
         item.setPen(pen)
         item.setBrush(brush)
         item.setToolTip(self._tooltip(layer_key, feat))
@@ -351,6 +368,7 @@ class MapCanvas(QGraphicsView):
             text.setFont(font)
             text.setDefaultTextColor(QColor("#e5e7eb"))
             text.setPos(p.x() + 6, p.y() - 14)
+            text.setFlag(QGraphicsTextItem.ItemIgnoresTransformations, True)
             text.setZValue(90)
             self.scene().addItem(text)
 

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=MGT Map Generator
+Comment=Meric's Game Tools - Map Generator
+Exec=mgt-map-gen
+Icon=mgt-map-gen
+Categories=Graphics;Science;Geography;
+Terminal=false

@@ -2,7 +2,6 @@ import base64
 import hashlib
 import json
 import math
-import time
 import unicodedata
 from pathlib import Path
 
@@ -146,10 +145,9 @@ class RegionKeyFactory:
         normalized_name = normalize_value(raw_name) or "region"
         normalized_country = normalize_value(properties.get("country")) or "world"
         encoded = base64.urlsafe_b64encode((raw_name or normalized_name).encode("utf-8")).decode("ascii").rstrip("=")
-        timestamp = int(time.time() * 1000)
-        raw = f"{raw_name}|{normalized_name}|{normalized_country}|{timestamp}|{self.counter}"
+        raw = f"{raw_name}|{normalized_name}|{normalized_country}|{self.counter}"
         digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
-        return f"{base36(timestamp).rjust(9, '0')}-{base36(self.counter).rjust(3, '0')}-{digest}-{encoded}"
+        return f"{'0' * 9}-{base36(self.counter).rjust(3, '0')}-{digest}-{encoded}"
 
 
 def base36(value):
@@ -329,16 +327,36 @@ def geojson_from_points(points):
     return feature_collection([feature(item["geom"], sanitize_properties(item["properties"])) for item in points])
 
 
+def transform_collection(collection, fn):
+    """Return a copy of a FeatureCollection with every geometry passed through fn(shapely_geom)."""
+    return feature_collection(
+        {"type": "Feature", "properties": item["properties"], "geometry": mapping(fn(shape(item["geometry"])))}
+        for item in collection["features"]
+    )
+
+
 def to_public_feature(geom, props, overrides=None):
     return feature(geom, sanitize_properties(props, overrides))
 
 
+EARTH_RADIUS_KM = 6371.0088
+
+
 def distance_km(a, b):
-    return a.distance(b) * 111.32
+    """Great-circle (haversine) distance in km between two lon/lat points."""
+    lat1, lat2 = math.radians(a.y), math.radians(b.y)
+    dlat = lat2 - lat1
+    dlng = math.radians(b.x - a.x)
+    h = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlng / 2) ** 2
+    return 2 * EARTH_RADIUS_KM * math.asin(min(1.0, math.sqrt(h)))
 
 
 def line_length_km(geom):
-    return geom.length * 111.32
+    """Approximate length in km of a lon/lat geometry (longitude scaled by cos(lat))."""
+    if geom.is_empty or geom.length == 0:
+        return 0.0
+    lat = math.radians((geom.bounds[1] + geom.bounds[3]) / 2)
+    return geom.length * 111.195 * max(math.cos(lat), 0.05)
 
 
 def representative_point(geom, preferred=None):

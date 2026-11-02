@@ -49,6 +49,7 @@ from ..core.geo_utils import DEFAULT_BBOX, EMPTY_COUNTRY_POLICIES, LAYER_LABELS,
 from .widgets import FileRow, Worker
 from .map_canvas import MapCanvas
 from .style_settings import apply_theme, load_settings, save_settings
+from .workspace import WORKSPACE_FILTER, load_file, save_file
 
 
 class MainWindow(QMainWindow):
@@ -61,6 +62,7 @@ class MainWindow(QMainWindow):
         self.active_layer = "cities"
         self.result = None
         self.empty_overrides = {}
+        self.workspace_path = ""
         self.thread = None
         self.worker = None
         self.current_job_mode = None
@@ -87,6 +89,15 @@ class MainWindow(QMainWindow):
         open_action = QAction("Open Layer", self)
         open_action.setShortcut(QKeySequence.Open)
         open_action.triggered.connect(lambda: self.file_rows["cities"].browse())
+        open_ws_action = QAction("Open Workspace...", self)
+        open_ws_action.setShortcut("Ctrl+Shift+O")
+        open_ws_action.triggered.connect(self.open_workspace)
+        save_ws_action = QAction("Save Workspace", self)
+        save_ws_action.setShortcut(QKeySequence.Save)
+        save_ws_action.triggered.connect(self.save_workspace)
+        save_ws_as_action = QAction("Save Workspace As...", self)
+        save_ws_as_action.setShortcut("Ctrl+Shift+S")
+        save_ws_as_action.triggered.connect(self.save_workspace_as)
         generate_action = QAction("Run", self)
         generate_action.setShortcut("Ctrl+R")
         generate_action.triggered.connect(lambda: self.generate("manual"))
@@ -95,7 +106,10 @@ class MainWindow(QMainWindow):
         quit_action = QAction("Quit", self)
         quit_action.setShortcut(QKeySequence.Quit)
         quit_action.triggered.connect(self.close)
-        for action in [new_action, open_action, generate_action, export_action, quit_action]:
+        for action in [new_action, open_action, open_ws_action, save_ws_action, save_ws_as_action]:
+            file_menu.addAction(action)
+        file_menu.addSeparator()
+        for action in [generate_action, export_action, quit_action]:
             file_menu.addAction(action)
 
         view_menu = menu.addMenu("View")
@@ -129,6 +143,8 @@ class MainWindow(QMainWindow):
         left_scroll = QScrollArea()
         left_scroll.setWidgetResizable(True)
         left_scroll.setFrameShape(QScrollArea.NoFrame)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        left_scroll.setMinimumWidth(400)
         left_scroll.setWidget(self._left_panel())
         splitter.addWidget(left_scroll)
         splitter.addWidget(self._center_panel())
@@ -136,6 +152,7 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setStretchFactor(2, 0)
+        splitter.setSizes([420, 780, 300])
         self.setCentralWidget(splitter)
         self.statusBar().showMessage("Ready")
 
@@ -214,6 +231,14 @@ class MainWindow(QMainWindow):
         self.policy_default.addItem("Keep Empty Land", EMPTY_COUNTRY_POLICIES["empty"])
         self.policy_default.addItem("Convert to Lake", EMPTY_COUNTRY_POLICIES["lake"])
         self.policy_default.addItem("Merge to Nearest Small Land", EMPTY_COUNTRY_POLICIES["merge"])
+        self.sea_cell_scale = QDoubleSpinBox()
+        self.sea_cell_scale.setRange(0.5, 50)
+        self.sea_cell_scale.setSingleStep(0.5)
+        self.sea_cell_scale.setValue(3.0)
+        self.sea_cell_scale.setToolTip("Auto-generated sea regions are this many times the median land province area (used when no sea seeds are given)")
+        self.sea_seed = QSpinBox()
+        self.sea_seed.setRange(0, 999999)
+        self.sea_seed.setValue(1)
         form.addRow("Lloyd", self.lloyd)
         form.addRow("Iterations", self.lloyd_iter)
         form.addRow("River Influence", self.river)
@@ -223,6 +248,8 @@ class MainWindow(QMainWindow):
         form.addRow("Smooth Iter.", self.smoothing_iter)
         form.addRow("Strength", self.smoothing_strength)
         form.addRow("Empty Country", self.policy_default)
+        form.addRow("Sea Cell Scale", self.sea_cell_scale)
+        form.addRow("Sea Seed", self.sea_seed)
         generation_layout.addWidget(gen)
 
         package = QGroupBox("Package Metadata")
@@ -234,8 +261,11 @@ class MainWindow(QMainWindow):
         self.map_key = QLineEdit()
         self.map_name = QLineEdit()
         self.map_version = QLineEdit()
-        self.projection = QLineEdit("projected-2d")
-        for widget in [self.map_key, self.map_name, self.map_version, self.projection]:
+        self.projection = QComboBox()
+        self.projection.addItem("lcc", "lcc")
+        self.projection.addItem("lonlat", "lonlat")
+        self.projection.setToolTip("lcc: Lambert conformal conic in km (recommended). lonlat: raw degrees.")
+        for widget in [self.map_key, self.map_name, self.map_version]:
             widget.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.world_width = QDoubleSpinBox()
         self.world_width.setRange(0, 1000000)
@@ -375,7 +405,28 @@ class MainWindow(QMainWindow):
         self.warning_text.setReadOnly(True)
         self.diagnostic_text = QTextEdit()
         self.diagnostic_text.setReadOnly(True)
-        self.bottom_tabs.addTab(self.layer_list, "Layers")
+        layers_page = QWidget()
+        layers_layout = QVBoxLayout(layers_page)
+        layers_layout.setContentsMargins(0, 0, 0, 0)
+        overlay_row = QHBoxLayout()
+        overlay_row.addWidget(QLabel("Show over map:"))
+        self.overlay_checks = {}
+        for key, label, default in [
+            ("rivers", "Rivers", True),
+            ("movementEdges", "Move edges", False),
+            ("movementNodes", "Move nodes", False),
+            ("rail", "Rail", False),
+            ("generatedCities", "Pkg cities", False),
+        ]:
+            box = QCheckBox(label)
+            box.setChecked(default)
+            box.toggled.connect(lambda _checked: self.update_preview(keep_view=True))
+            self.overlay_checks[key] = box
+            overlay_row.addWidget(box)
+        overlay_row.addStretch(1)
+        layers_layout.addLayout(overlay_row)
+        layers_layout.addWidget(self.layer_list, 1)
+        self.bottom_tabs.addTab(layers_page, "Layers")
         self.bottom_tabs.addTab(self.package_text, "Package")
         self.bottom_tabs.addTab(self.warning_text, "Warnings")
         self.bottom_tabs.addTab(self.diagnostic_text, "Diagnostics")
@@ -417,7 +468,7 @@ class MainWindow(QMainWindow):
             <p><b>Meric's Game Tools - Map Generator</b> is a desktop workbench for building Meric's Game Tools map packages.</p>
             <p>It imports GeoJSON source layers, generates provinces and sea regions, builds movement and rail graph outputs, and lets you inspect the generated layers before export.</p>
             <p><b>Repository:</b><br>
-            <a href="https://github.com/merchizm/mgt_map_generator">https://github.com/merchizm/mgt_map_generator</a></p>
+            <a href="https://github.com/merchizm/mgt-map-generator">https://github.com/merchizm/mgt-map-generator</a></p>
             """
         )
         buttons = QHBoxLayout()
@@ -471,7 +522,59 @@ class MainWindow(QMainWindow):
         apply_theme(self)
         self.settings.setValue("dark", self.dark)
 
+    def update_title(self):
+        name = Path(self.workspace_path).name if self.workspace_path else ""
+        self.setWindowTitle("Meric's Game Tools - Map Generator" + (f" - {name}" if name else ""))
+
+    def open_workspace(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Open Workspace", str(Path(self.workspace_path).parent) if self.workspace_path else "", WORKSPACE_FILTER)
+        if path:
+            self.open_workspace_path(path)
+
+    def open_workspace_path(self, path, quiet=False):
+        try:
+            missing = load_file(self, path)
+        except Exception as exc:
+            if not quiet:
+                QMessageBox.warning(self, "Could Not Open Workspace", str(exc))
+            raise
+        self.workspace_path = str(Path(path).resolve())
+        self.update_title()
+        self.analyze_empty_countries()
+        if missing and not quiet:
+            QMessageBox.warning(self, "Missing Files", "These files from the workspace were not found:\n\n" + "\n".join(missing))
+        self.statusBar().showMessage(f"Workspace loaded: {path}")
+
+    def save_workspace(self):
+        if not self.workspace_path:
+            return self.save_workspace_as()
+        try:
+            save_file(self, self.workspace_path)
+        except Exception as exc:
+            QMessageBox.warning(self, "Could Not Save Workspace", str(exc))
+            return
+        self.statusBar().showMessage(f"Workspace saved: {self.workspace_path}")
+
+    def save_workspace_as(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Save Workspace", self.workspace_path or "workspace.mgtws", WORKSPACE_FILTER)
+        if not path:
+            return
+        if not Path(path).suffix:
+            path += ".mgtws"
+        self.workspace_path = str(Path(path).resolve())
+        self.update_title()
+        self.save_workspace()
+
     def closeEvent(self, event):
+        if self.workspace_path:  # keep the open workspace file current
+            try:
+                save_file(self, self.workspace_path)
+            except Exception:
+                pass
+        self.live_timer.stop()
+        if self.thread and self.thread.isRunning():
+            self.thread.quit()
+            self.thread.wait()
         save_settings(self)
         self.cleanup_live_output_dirs()
         super().closeEvent(event)
@@ -489,12 +592,15 @@ class MainWindow(QMainWindow):
             self.river_strength,
             self.smoothing_iter,
             self.smoothing_strength,
+            self.sea_cell_scale,
+            self.sea_seed,
             *self.bbox_inputs,
         ]:
             widget.valueChanged.connect(self.schedule_live_preview)
         for widget in [
             self.smoothing_method,
             self.policy_default,
+            self.projection,
         ]:
             widget.currentIndexChanged.connect(self.schedule_live_preview)
         for widget in [
@@ -502,7 +608,6 @@ class MainWindow(QMainWindow):
             self.map_key,
             self.map_name,
             self.map_version,
-            self.projection,
             self.package_dir,
         ]:
             widget.textChanged.connect(self.schedule_live_preview)
@@ -544,6 +649,8 @@ class MainWindow(QMainWindow):
         return True
 
     def new_project(self):
+        self.workspace_path = ""
+        self.update_title()
         self.files.clear()
         self.layers.clear()
         self.result = None
@@ -590,10 +697,10 @@ class MainWindow(QMainWindow):
                 self.update_preview()
                 return
 
-    def update_preview(self):
+    def update_preview(self, keep_view=False):
         layer = self.layers.get(self.active_layer)
         preview_layers = self.preview_layer_stack(self.active_layer)
-        self.canvas.set_layers(preview_layers, self.active_layer, [spin.value() for spin in self.bbox_inputs])
+        self.canvas.set_layers(preview_layers, self.active_layer, [spin.value() for spin in self.bbox_inputs], keep_view)
         self.code.setPlainText(json.dumps(layer or {}, ensure_ascii=False, indent=2))
         self.update_inspector()
 
@@ -623,12 +730,22 @@ class MainWindow(QMainWindow):
             stack.append(("borders", self.layers["borders"]))
         if self.layers.get(active_layer):
             stack.append((active_layer, self.layers[active_layer]))
+        overlays = self.overlay_checks
+        extra = []
+        if overlays["rivers"].isChecked():
+            extra.append("rivers")
         if active_layer == "output":
-            for key in ["rivers", "movementEdges", "railEdges", "movementNodes", "railNodes", "generatedCities"]:
-                if self.layers.get(key):
-                    stack.append((key, self.layers[key]))
-        elif active_layer not in {"rivers", "movementEdges", "railEdges"} and self.layers.get("rivers"):
-            stack.append(("rivers", self.layers["rivers"]))
+            if overlays["movementEdges"].isChecked():
+                extra.append("movementEdges")
+            if overlays["rail"].isChecked():
+                extra += ["railEdges", "railNodes"]
+            if overlays["movementNodes"].isChecked():
+                extra.append("movementNodes")
+            if overlays["generatedCities"].isChecked():
+                extra.append("generatedCities")
+        for key in extra:
+            if key != active_layer and self.layers.get(key):
+                stack.append((key, self.layers[key]))
         return stack
 
     def on_feature_selected(self, payload):
@@ -643,6 +760,7 @@ class MainWindow(QMainWindow):
             if key in props:
                 details.append(f"{key}: {props[key]}")
         self.statusBar().showMessage(" | ".join(details[:4]))
+        self.update_inspector()
         self.inspector.setPlainText(self.inspector.toPlainText() + "\n\n" + "\n".join(details))
 
     def update_inspector(self):
@@ -758,10 +876,12 @@ class MainWindow(QMainWindow):
             "smoothingMethod": self.smoothing_method.currentText(),
             "smoothingIterations": self.smoothing_iter.value(),
             "smoothingStrength": self.smoothing_strength.value(),
+            "seaAutoCellScale": self.sea_cell_scale.value(),
+            "seaSeed": self.sea_seed.value(),
             "mapKey": self.map_key.text().strip() or None,
             "mapName": self.map_name.text().strip() or None,
             "mapVersion": self.map_version.text().strip() or None,
-            "projection": self.projection.text().strip() or None,
+            "projectionMode": self.projection.currentData(),
             "worldWidth": self.world_width.value() or None,
             "worldHeight": self.world_height.value() or None,
             "packageDir": self.package_dir.text().strip() or None,

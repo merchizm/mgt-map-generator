@@ -17,6 +17,9 @@ mgt-map-gen-cli = "mgt_map_gen_py.cli.main:main"
 [tool.setuptools.packages.find]
 include = ["mgt_map_gen_py*"]
 
+[tool.setuptools.package-data]
+"mgt_map_gen_py.ui" = ["icons/*.svg"]
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"

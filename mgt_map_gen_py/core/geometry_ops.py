@@ -1,5 +1,7 @@
 from shapely.geometry import Point, Polygon
+from shapely.errors import GEOSException
 from shapely.ops import nearest_points, unary_union
+from shapely.validation import make_valid
 
 from .geo_utils import clean_geom
 
@@ -42,6 +44,11 @@ def bezier_ring(coords, iterations, strength):
     return current + [current[0]]
 
 
+def _valid_polygon(polygon):
+    """Smoothing/nudging can make a ring self-intersect; repair it so later unions don't fail."""
+    return polygon if polygon.is_valid else make_valid(polygon)
+
+
 def smooth_geom(geom, method="chaikin", iterations=1, strength=0.24):
     if geom.is_empty:
         return geom
@@ -53,7 +60,11 @@ def smooth_geom(geom, method="chaikin", iterations=1, strength=0.24):
             if method == "bezier"
             else chaikin_ring(poly.exterior.coords, iterations)
         )
-        out.append(Polygon(exterior, [ring.coords for ring in poly.interiors]))
+        smoothed = _valid_polygon(Polygon(exterior))
+        holes = [Polygon(ring.coords) for ring in poly.interiors]
+        if holes:
+            smoothed = smoothed.difference(unary_union([_valid_polygon(h) for h in holes]))
+        out.append(smoothed)
     return clean_geom(unary_union(out))
 
 
@@ -98,7 +109,7 @@ def apply_river_influence(geom, river_items, strength):
     adjusted = []
     for poly in geoms:
         exterior = influence_ring(poly.exterior.coords, river_items, strength)
-        adjusted.append(Polygon(exterior, [ring.coords for ring in poly.interiors]))
+        adjusted.append(_valid_polygon(Polygon(exterior, [ring.coords for ring in poly.interiors])))
     candidate = clean_geom(unary_union(adjusted))
     if candidate.is_empty or candidate.area < geom.area * 0.94:
         return geom
@@ -118,11 +129,15 @@ def clip_region(cell, country_mask, land_mask, lakes_mask, options, warnings, co
         warnings.push("land_clip_empty", "Province disappeared after land clipping.", context)
         return None
     if options.get("riverInfluenceEnabled"):
-        candidate = apply_river_influence(
-            current,
-            options.get("riverFeatures", []),
-            float(options.get("riverInfluenceStrength", 0.32)),
-        )
+        try:
+            candidate = apply_river_influence(
+                current,
+                options.get("riverFeatures", []),
+                float(options.get("riverInfluenceStrength", 0.32)),
+            )
+        except GEOSException:
+            warnings.push("river_influence_failed", "River influence hit invalid geometry; province was kept as-is.", context)
+            candidate = current
         if candidate.equals(current):
             warnings.push("river_influence_noop", "River influence did not alter this province safely.", context)
         current = candidate
@@ -133,15 +148,18 @@ def clip_region(cell, country_mask, land_mask, lakes_mask, options, warnings, co
         else:
             warnings.push("lake_difference_failed", "Lake subtraction failed; province was kept as-is.", context)
     if options.get("smoothingEnabled"):
-        candidate = smooth_geom(
-            current,
-            options.get("smoothingMethod", "chaikin"),
-            options.get("smoothingIterations", 1),
-            options.get("smoothingStrength", 0.24),
-        )
-        if not candidate.is_empty and candidate.area >= current.area * 0.96:
-            current = candidate.intersection(current)
-        else:
-            warnings.push("smoothing_fallback", "Smoothed geometry failed area-retention checks. Original geometry was kept.", context)
+        try:
+            candidate = smooth_geom(
+                current,
+                options.get("smoothingMethod", "chaikin"),
+                options.get("smoothingIterations", 1),
+                options.get("smoothingStrength", 0.24),
+            )
+            if not candidate.is_empty and candidate.area >= current.area * 0.96:
+                current = candidate.intersection(current)
+            else:
+                warnings.push("smoothing_fallback", "Smoothed geometry failed area-retention checks. Original geometry was kept.", context)
+        except GEOSException:
+            warnings.push("smoothing_fallback", "Smoothing hit invalid geometry. Original geometry was kept.", context)
     current = clean_geom(current)
     return None if current.is_empty else current
