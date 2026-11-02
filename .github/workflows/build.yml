@@ -8,7 +8,7 @@ on:
 env:
   PYINSTALLER_ARGS: >-
     --noconfirm --windowed --name mgt-map-gen --paths . --icon assets/icon.png
-    --add-data "mgt_map_gen_py/ui/icons:mgt_map_gen_py/ui/icons"
+    --add-data mgt_map_gen_py/ui/icons:mgt_map_gen_py/ui/icons
 
 jobs:
   windows:
